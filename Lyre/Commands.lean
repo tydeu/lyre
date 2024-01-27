@@ -10,6 +10,18 @@ open Lean IR Elab Command
 
 namespace Lyre
 
+/-- Logs the final IR of a constant. Useful for testing. -/
+scoped elab (name := Test.printIr) kw:"#print_ir " id:ident : command => do
+  let name ← do
+    try
+      resolveGlobalConstNoOverloadWithInfo id
+    catch _ =>
+      pure <| if rootNamespace.isPrefixOf id.getId
+        then removeRoot id.getId else (← getCurrNamespace) ++ id.getId
+  let some decl := IR.findEnvDecl (← getEnv) name
+    | throwErrorAt id "no IR found for '{name}'"
+  logInfoAt kw (IR.declToString decl)
+
 /--
 Directly set the Lean IR for a the definition `name`.
 The definition most not already have IR. This can be accomplish, e.g.,
