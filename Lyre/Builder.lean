@@ -33,19 +33,22 @@ abbrev ExternEntry := TSyntax ``Parser.Attr.externEntry
 abbrev MDataVal := TSyntax ``mdataVal
 
 inductive Var
-| vdecl (id : VarId) (ty : IRType) (val : IR.Expr)
-| param (id : VarId) (ty : IRType)
+| vdecl (ref : Syntax) (id : VarId) (ty : IRType) (val : IR.Expr)
+| param (ref : Syntax) (id : VarId) (ty : IRType)
 
-@[inline] def Var.mk (id : VarId) (ty : IRType) (val? : Option IR.Expr := none) : Var :=
+@[inline] def Var.mk (ref : Syntax) (id : VarId) (ty : IRType) (val? : Option IR.Expr := none) : Var :=
   match val? with
-  | some val => .vdecl id ty val
-  | none => .param id ty
+  | some val => .vdecl ref id ty val
+  | none => .param ref id ty
+
+@[inline] def Var.ref : Var → Syntax
+| .vdecl (ref := ref) .. | .param (ref := ref) .. => ref
 
 @[inline] def Var.id : Var → VarId
-| .vdecl id .. | .param id .. => id
+| .vdecl (id := id) .. | .param (id := id) .. => id
 
 @[inline] def Var.ty : Var → IRType
-| .vdecl _ ty .. | .param _ ty .. => ty
+| .vdecl (ty := ty) .. | .param (ty := ty) .. => ty
 
 structure JoinPoint where
   id : JoinPointId
@@ -97,16 +100,19 @@ def withNewScope (x : BuilderM α) : BuilderM α := do
 @[inline] def newVarId : BuilderM VarId := modifyGet fun s =>
   (s.nextVarId, {s with nextVarId := ⟨s.nextVarId.idx + 1⟩})
 
-@[inline] def newVar (name : Name) (ty : IRType) (val? : Option IR.Expr := none) : BuilderM VarId := do
+@[inline] def newVar (ref : Syntax) (name : Name) (ty : IRType) (val? : Option IR.Expr := none)  : BuilderM VarId := do
   let id ← newVarId
-  let v := Var.mk id ty val?
+  let v := Var.mk ref id ty val?
   modify fun s =>
     let scope := {s.currScope with vars := s.currScope.vars.insert name v}
     {s with currScope := scope}
   return id
 
+@[inline] def getLocalVar? (name : Name) : BuilderM (Option Var) := do
+  return (← get).currScope.vars.find? name
+
 @[inline] def getVar? (name : Name) : BuilderM (Option Var) := do
-  return (← get).currScope.vars.find? name <|> (← read).parentScopes.findSome? (·.vars.find? name)
+  return (← getLocalVar? name) <|> (← read).parentScopes.findSome? (·.vars.find? name)
 
 @[inline]  def getVar (id : Ident) : BuilderM Var := do
   match (← getVar? id.getId) with
@@ -144,7 +150,7 @@ def mkParam (stx : Lyre.Param) : BuilderM IR.Param := do
   | `(param|($id : $[@&%$b?]? $ty)) =>
     let ty ← mkType ty
     let name? ← mkVarName? id
-    let x ← if let some name := name? then newVar name ty else newVarId
+    let x ← if let some name := name? then newVar stx name ty else newVarId
     return {x, borrow := b?.isSome, ty}
   | _ => throwIllFormedSyntax stx "IR parameter"
 
@@ -190,7 +196,7 @@ def mkCtor (stx : Lyre.CtorInfo) (argStxs : Array Lyre.Arg) : BuilderM (IR.CtorI
   let `(ctorInfo|$ctor$[.$usize?.$ssize?]?$[[$ctorId?]]?) := stx
     | throwIllFormedSyntax stx "IR constructor"
   let some cidx := extractCIdx? ctor
-    | throwErrorAt ctor s!"ill-formed IR constructor name '{ctor.getId}'"
+    | throwWithSyntax (ref := ctor) stx s!"ill-formed IR constructor name '{ctor.getId}'"
   let name ← id do
     let some ctorId := ctorId? | return Name.anonymous
     let name ← resolveGlobalConstNoOverloadWithInfo ctorId
@@ -243,7 +249,7 @@ def mkExpr (stx : Lyre.Expr) : BuilderM (IR.Expr × Option IRType) := do
       let ty := if info.isRef then .object else .uint8
       return (.ctor info args, some ty)
     else
-      throwErrorAt c s!"unknown IR constant '{name}'"
+      throwWithSyntax (ref := c) stx s!"unknown IR constant '{name}'"
   | `(irExpr|pap $c $ys*) =>
     return (.pap c.getId (← ys.mapM mkArg), some .object)
   | `(irExpr|app $x $ys*) =>
@@ -290,10 +296,12 @@ partial def initStmtIds (stx : Stmt) : BuilderM Unit := do
   | `(irStmt|let $x $[: $ty?]? := $e) =>
     let some name ← mkVarName? x
       | return
+    if let some var ← getLocalVar? name then
+      throwErrorAt x m!"cannot redeclare '{name}' in the same block-level scope:{indentD stx}\nit was previously declared as:{indentD var.ref}"
     let (val, ity?) ← mkExpr e
     let some ty ← expectType? name ity? ty?
-      | throwErrorAt x s!"cannot infer type for '{name}'"
-    discard <| newVar name ty val
+      | throwWithSyntax (ref := x) stx s!"cannot infer type for '{name}'"
+    discard <| newVar stx name ty val
   | `(irStmt|$j:ident $ps* $[: $ty?]? := $stmts*) =>
     let (ps, body, ty?) ← withNewScope do
       let ps ← ps.mapM mkParam
@@ -365,7 +373,7 @@ partial def prependStmt (stx : Stmt) (b : FnBody) : BuilderM FnBody := do
   match stx with
   | `(irStmt|let $x $[: $ty?]? := $e) =>
     if let some name ← mkVarName? x then
-      let some (.vdecl x ty val) ← getVar? name
+      let some (.vdecl _ x ty val) ← getVar? name
         | throwErrorAt x s!"(internal) variable '{name}' not pre-declared"
       return .vdecl x ty val b
     else
@@ -399,7 +407,8 @@ partial def prependStmt (stx : Stmt) (b : FnBody) : BuilderM FnBody := do
     throwWithSyntax stx m!"control statement must be the last statement in a function body"
   | _ => throwIllFormedSyntax stx "IR statement"
 
-partial def mkFnBody (stmts : Array Stmt) : BuilderM (FnBody × Option IRType) := do
+partial def mkFnBody (stmts : Array Stmt) : BuilderM (FnBody × Option IRType) :=
+  withNewScope do
   stmts.forM initStmtIds
   let (stmt, ty?) ← mkControlStmt stmts.back
   let body ← stmts.foldrM prependStmt stmt (start := stmts.size - 1)
