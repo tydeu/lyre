@@ -14,11 +14,10 @@ on an Lean IR object (e.g., `Lean.IR.Decl`).
 -/
 
 namespace Lyre
+open Lean Parser
 
 /-! ## Constructors -/
 
-section
-open Lean Parser
 def checkCtor :=
   checkStackTop (msg := "expected 'ctor_{n}'") fun stx =>
     match stx with
@@ -32,7 +31,6 @@ syntax ctorInfo :=
   ident checkCtor
   (noWs "." noWs ctorInfoIdx noWs "." noWs ctorInfoIdx)?
   ("[" ident "]")?
-end
 
 /-! ## Types -/
 
@@ -54,7 +52,6 @@ syntax union : irType := &"union " (ident)? "{" ppGroup(ppIndent((irType,*))) "}
 
 declare_syntax_cat irExpr (behavior := symbol)
 
-syntax param := "(" ident  " : " "@& "? irType ")"
 syntax arg := ident <|> "◾"
 
 syntax ctor : irExpr := ctorInfo (colGt ppSpace arg)*
@@ -80,6 +77,7 @@ declare_syntax_cat irStmt (behavior := symbol)
 syntax stmtSeq := sepBy1IndentSemicolon(irStmt)
 
 syntax endSemi := ";"?
+syntax param := "(" binderIdent  " : " "@& "? irType ")"
 syntax ctorAlt := ident " →" ppIndent(stmtSeq)
 syntax defaultAlt := &"default" " →" ppIndent(stmtSeq)
 syntax alt := ctorAlt <|> defaultAlt
@@ -87,7 +85,7 @@ syntax alt := ctorAlt <|> defaultAlt
 syntax kvpair := ident " := " term
 syntax mdataVal := ("$" term:max) <|> ("[" kvpair,* "]")
 
-syntax vdecl : irStmt := "let " ident (" : " irType)? " := " irExpr
+syntax vdecl : irStmt := "let " binderIdent (" : " irType)? " := " irExpr
 syntax jdecl : irStmt := ident param* (" : " irType)? " :=" ppIndent(stmtSeq)
 syntax set : irStmt := &"set " ident "[" num "] := " arg
 syntax uset : irStmt := &"uset " ident "[" num "] := " ident

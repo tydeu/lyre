@@ -23,6 +23,7 @@ abbrev Stmt := TSyntax `irStmt
 abbrev Decl := TSyntax `irDecl
 
 abbrev Arg := TSyntax ``arg
+abbrev BinderIdent := TSyntax ``Lean.binderIdent
 abbrev Param := TSyntax ``param
 abbrev CtorInfo := TSyntax ``ctorInfo
 abbrev CtorInfoIdx := TSyntax ``ctorInfoIdx
@@ -88,15 +89,21 @@ def withNewScope (x : BuilderM α) : BuilderM α := do
 @[inline] def getJoinPoint (id : Ident) : BuilderM JoinPoint := do
   match (← getJoinPoint? id.getId) with
   | some j => return j
-  | none => throw <| .error id s!"unknown IR join point '{id.getId}'"
+  | none => throwErrorAt id s!"unknown IR join point '{id.getId}'"
 
 @[inline] def getJoinPointId (id : Ident) : BuilderM JoinPointId := do
   return (← getJoinPoint id).id
 
-@[inline] def newVar (name : Name) (ty : IRType) (val? : Option IR.Expr := none) : BuilderM VarId := modifyGet fun s =>
-  let v := Var.mk s.nextVarId ty val?
-  let scope := {s.currScope with vars := s.currScope.vars.insert name v}
-  (v.id, {s with nextVarId := ⟨v.id.idx + 1⟩, currScope := scope})
+@[inline] def newVarId : BuilderM VarId := modifyGet fun s =>
+  (s.nextVarId, {s with nextVarId := ⟨s.nextVarId.idx + 1⟩})
+
+@[inline] def newVar (name : Name) (ty : IRType) (val? : Option IR.Expr := none) : BuilderM VarId := do
+  let id ← newVarId
+  let v := Var.mk id ty val?
+  modify fun s =>
+    let scope := {s.currScope with vars := s.currScope.vars.insert name v}
+    {s with currScope := scope}
+  return id
 
 @[inline] def getVar? (name : Name) : BuilderM (Option Var) := do
   return (← get).currScope.vars.find? name <|> (← read).parentScopes.findSome? (·.vars.find? name)
@@ -104,7 +111,7 @@ def withNewScope (x : BuilderM α) : BuilderM α := do
 @[inline]  def getVar (id : Ident) : BuilderM Var := do
   match (← getVar? id.getId) with
   | some v => return v
-  | none => throw <| .error id s!"unknown IR variable '{id.getId}'"
+  | none => throwErrorAt id s!"unknown IR variable '{id.getId}'"
 
 @[inline] def getVarId (id : Ident) : BuilderM VarId := do
   return (← getVar id).id
@@ -126,11 +133,19 @@ partial def mkType (ty : Ty) : BuilderM IRType :=
     return .union (id?.map (·.getId) |>.getD .anonymous) (← tys.getElems.mapM mkType)
   | ty => throwIllFormedSyntax ty "IR type"
 
+def mkVarName? (stx : BinderIdent) : BuilderM (Option Name) :=
+  match stx with
+  | `(binderIdent|_) => return none
+  | `(binderIdent|$x:ident) => return some x.getId
+  | _ => throwIllFormedSyntax stx "binder ident"
+
 def mkParam (stx : Lyre.Param) : BuilderM IR.Param := do
   match stx with
   | `(param|($id : $[@&%$b?]? $ty)) =>
     let ty ← mkType ty
-    return {x := ← newVar id.getId ty, borrow := b?.isSome, ty}
+    let name? ← mkVarName? id
+    let x ← if let some name := name? then newVar name ty else newVarId
+    return {x, borrow := b?.isSome, ty}
   | _ => throwIllFormedSyntax stx "IR parameter"
 
 def mkArg (stx : Lyre.Arg) : BuilderM IR.Arg := do
@@ -150,23 +165,13 @@ def extractCIdx? (ctor : Ident) : Option Nat := do
   unless c.startsWith "ctor_" do failure
   c.drop 5 |>.toNat?
 
-def mkCtor (stx : Lyre.CtorInfo) (argStxs : Array Lyre.Arg) : BuilderM (IR.CtorInfo × Array IR.Arg) := do
-  let `(ctorInfo|$ctor$[.$usize?.$ssize?]?$[[$id?]]?) := stx
-    | throwIllFormedSyntax stx "IR constructor"
-  let name := id?.map (·.getId) |>.getD .anonymous
-  let some cidx := extractCIdx? ctor
-    | throw <| .error ctor s!"ill-formed IR constructor name '{ctor.getId}'"
-  if let some id := id? then
-    let name ← resolveGlobalConstNoOverloadWithInfo id
-    let some (.ctorInfo {cidx := ecidx, ..}) := (← getEnv).find? name
-      | throwWithSyntax (ref := id) stx m!"'{name}' is not a constructor"
-    if cidx != ecidx then
-      throwWithSyntax stx m!"constructor tag mismatch: constructor '{id.getId}' is expected to be 'ctor_{ecidx}'"
+def mkCtorApp (name : Name) (cidx : Nat) (argStxs : Array Lyre.Arg) : BuilderM (IR.CtorInfo × Array IR.Arg) := do
   let args : Array IR.Arg := Array.mkEmpty argStxs.size
   let info : IR.CtorInfo := {name, cidx, size := 0, usize := 0, ssize := 0}
-  let (args, info) ← argStxs.foldlM (init := (args, info)) fun (args, info) stx => do
+  argStxs.foldlM (init := (info, args)) fun (info, args) stx => do
     match stx with
-    | `(arg|◾) => return (args.push .irrelevant, info)
+    | `(arg|◾) =>
+      return (info, args.push .irrelevant)
     | `(arg|$id:ident) =>
       let var ← getVar id
       let info :=
@@ -176,10 +181,25 @@ def mkCtor (stx : Lyre.CtorInfo) (argStxs : Array Lyre.Arg) : BuilderM (IR.CtorI
         | .uint32 => {info with usize := info.ssize+4}
         | .float | .uint64 => {info with usize := info.ssize+8}
         | .usize => {info with usize := info.usize+1}
-        | .object | .tobject => {info with size:= info.size+1}
+        | .object | .tobject => {info with size := info.size+1}
         | _ => info
-      return (args.push (.var var.id), info)
+      return (info, args.push (.var var.id))
     | _ => throwIllFormedSyntax stx "IR argument"
+
+def mkCtor (stx : Lyre.CtorInfo) (argStxs : Array Lyre.Arg) : BuilderM (IR.CtorInfo × Array IR.Arg) := do
+  let `(ctorInfo|$ctor$[.$usize?.$ssize?]?$[[$ctorId?]]?) := stx
+    | throwIllFormedSyntax stx "IR constructor"
+  let some cidx := extractCIdx? ctor
+    | throwErrorAt ctor s!"ill-formed IR constructor name '{ctor.getId}'"
+  let name ← id do
+    let some ctorId := ctorId? | return Name.anonymous
+    let name ← resolveGlobalConstNoOverloadWithInfo ctorId
+    let some (.ctorInfo {cidx := ecidx, ..}) := (← getEnv).find? name
+      | throwWithSyntax (ref := ctorId) stx m!"'{name}' is not a constructor"
+    if cidx != ecidx then
+      throwWithSyntax stx m!"constructor tag mismatch: constructor '{ctorId.getId}' is expected to be 'ctor_{ecidx}'"
+    return name
+  let (info, args) ← mkCtorApp name cidx argStxs
   if let some usizeStx := usize? then
     let usize := usizeStx.raw[0].isFieldIdx?.getD 0
     if usize != info.usize then
@@ -196,7 +216,7 @@ def mkExpr (stx : Lyre.Expr) : BuilderM (IR.Expr × Option IRType) := do
   match stx with
   | `(ctor|$i:ctorInfo $ys*) =>
     let (info, args) ← mkCtor i ys
-    let ty := if info.size > 0 then .object else .uint8
+    let ty := if info.isRef then .object else .uint8
     return (.ctor info args, some ty)
   | `(irExpr|reset[$n] $x) =>
     return (.reset n.getNat (← getVarId x), some .object)
@@ -213,12 +233,17 @@ def mkExpr (stx : Lyre.Expr) : BuilderM (IR.Expr × Option IRType) := do
   | `(irExpr|sproj[$n,$o] $x $[: $ty?]?) =>
     return (.sproj n.getNat o.getNat (← getVarId x), ← ty?.mapM mkType)
   | `(fap|$c:ident $ys*) =>
-    let some decl := IR.findEnvDecl (← getEnv) c.getId
-      | throw <| .error c s!"unknown IR constant '{c.getId}'"
-    try discard <| resolveGlobalConstNoOverloadWithInfo c catch _ => pure ()
-    let ty := match decl with
-      | .fdecl (type := ty) .. | .extern (type := ty) .. => ty
-    return (.fap c.getId (← ys.mapM mkArg), some ty)
+    let name ← try resolveGlobalConstNoOverloadWithInfo c catch _ => pure c.getId
+    if let some decl := IR.findEnvDecl (← getEnv) name then
+      let ty := match decl with
+        | .fdecl (type := ty) .. | .extern (type := ty) .. => ty
+      return (.fap name (← ys.mapM mkArg), some ty)
+    else if let some (.ctorInfo {cidx := cidx, ..}) := (← getEnv).find? name then
+      let (info, args) ← mkCtorApp name cidx ys
+      let ty := if info.isRef then .object else .uint8
+      return (.ctor info args, some ty)
+    else
+      throwErrorAt c s!"unknown IR constant '{name}'"
   | `(irExpr|pap $c $ys*) =>
     return (.pap c.getId (← ys.mapM mkArg), some .object)
   | `(irExpr|app $x $ys*) =>
@@ -237,18 +262,19 @@ def mkExpr (stx : Lyre.Expr) : BuilderM (IR.Expr × Option IRType) := do
   | _ =>
     throwIllFormedSyntax stx "IR expression"
 
-def expectType? (name : Name) (inferred? : Option IRType) (expected? : Option Ty) : BuilderM (Option IRType) := do
+def expectType? (name? : Option Name) (inferred? : Option IRType) (expected? : Option Ty) : BuilderM (Option IRType) := do
   let some ty := expected? | return inferred?
   let ety ← mkType ty
   let some ity := inferred? | return some ety
   unless ity == ety do
-    throw <| .error ty m!"type mismatch: '{name}' has type '{ity}' but is expected to have type '{ty}'"
+    let b := if let some name := name? then m!"'{name}'" else "expression"
+    throwErrorAt ty m!"type mismatch: {b} has type '{ity}' but is expected to have type '{ty}'"
   return some ety
 
 @[implemented_by Term.evalTerm]
 opaque evalTerm (α) (type : Lean.Expr) (value : Syntax) (safety := DefinitionSafety.safe) : TermElabM α
 
-def elabMDataVal (stx: MDataVal) : BuilderM IR.MData := do
+def mkMData (stx: MDataVal) : BuilderM IR.MData := do
   match stx with
   | `(mdataVal|$ $val) => evalTerm KVMap (mkConst ``KVMap) val
   | `(mdataVal|[$kvps,*]) => kvps.getElems.foldlM (init := KVMap.empty) fun m kv => do
@@ -257,17 +283,17 @@ def elabMDataVal (stx: MDataVal) : BuilderM IR.MData := do
     return m.insert key.getId (← evalTerm DataValue (mkConst ``DataValue) val)
   | _ => throwIllFormedSyntax stx "metadata value"
 
-section end
-
 mutual
 
 partial def initStmtIds (stx : Stmt) : BuilderM Unit := do
   match stx with
   | `(irStmt|let $x $[: $ty?]? := $e) =>
+    let some name ← mkVarName? x
+      | return
     let (val, ity?) ← mkExpr e
-    let some ty ← expectType? x.getId ity? ty?
-      | throw <| .error x s!"cannot infer type for '{x.getId}'"
-    discard <| newVar x.getId ty val
+    let some ty ← expectType? name ity? ty?
+      | throwErrorAt x s!"cannot infer type for '{name}'"
+    discard <| newVar name ty val
   | `(irStmt|$j:ident $ps* $[: $ty?]? := $stmts*) =>
     let (ps, body, ty?) ← withNewScope do
       let ps ← ps.mapM mkParam
@@ -285,7 +311,7 @@ partial def mkAlt (stx : Lyre.Alt) : BuilderM (IR.Alt × Option IRType) := do
     -- because they are not used by the core emitters
     -- and we do not have the relevant information.
     let some (.ctorInfo {cidx, ..}) := (← getEnv).find? id.getId
-      | throw <| .error id s!"unknown constructor '{id.getId}'"
+      | throwErrorAt id s!"unknown constructor '{id.getId}'"
     let info := {name := id.getId, cidx, size := 0, usize := 0, ssize := 0}
     let (body, ty?) ← mkFnBody stmts
     return (.ctor info body, ty?)
@@ -301,7 +327,7 @@ partial def mkAlts (stxs : Array Lyre.Alt) : BuilderM (Array IR.Alt × Option IR
       let some ty := ty? | return aty?
       let some aty := aty? | return ty?
       unless aty == ty do
-        throw <| .error stx m!"type mismatch:{indentD stx}\nhas type '{aty}' but is expected to have type '{ty}'"
+        throwErrorAt stx m!"type mismatch:{indentD stx}\nhas type '{aty}' but is expected to have type '{ty}'"
       return some ty
     return (alts.push alt, ty?)
 
@@ -313,7 +339,7 @@ partial def mkControlStmt (stx : Stmt) : BuilderM (FnBody × Option IRType) := d
     if let some ty := ty? then
       let ety ← mkType ty
       unless ety == var.ty do
-        throw <| .error ty m!"type mismatch: '{x.getId}' has type '{var.ty}' but is expected to have type '{ety}'"
+        throwErrorAt ty m!"type mismatch: '{x.getId}' has type '{var.ty}' but is expected to have type '{ety}'"
     let tid := tid?.map (·.getId) |>.getD .anonymous
     let (alts, ty?) ← mkAlts cs
     return (.case tid var.id var.ty alts, ty?)
@@ -337,13 +363,19 @@ partial def mkControlStmt (stx : Stmt) : BuilderM (FnBody × Option IRType) := d
 -- Precondition: top-level Var/JoinPoint ids are already declared
 partial def prependStmt (stx : Stmt) (b : FnBody) : BuilderM FnBody := do
   match stx with
-  | `(irStmt|let $x $[: $_]? := $_) =>
-    let some (.vdecl x ty e) ← getVar? x.getId
-      | throw <| .error x s!"(internal) variable '{x.getId}' not pre-declared"
-    return .vdecl x ty e b
+  | `(irStmt|let $x $[: $ty?]? := $e) =>
+    if let some name ← mkVarName? x then
+      let some (.vdecl x ty val) ← getVar? name
+        | throwErrorAt x s!"(internal) variable '{name}' not pre-declared"
+      return .vdecl x ty val b
+    else
+      let (val, ity?) ← mkExpr e
+      let some ty ← expectType? none ity? ty?
+        | throwErrorAt x s!"cannot infer type"
+      return .vdecl (← newVarId) ty val b
   | `(irStmt|$j:ident $_* $[: $_]? := $_*) =>
     let some j ← getJoinPoint? j.getId
-      | throw <| .error j s!"(internal) join point '{j.getId}' not pre-declared"
+      | throwErrorAt j s!"(internal) join point '{j.getId}' not pre-declared"
     return .jdecl j.id j.params j.body b
   | `(irStmt|set $x[$i] := $y) =>
     return .set (← getVarId x) i.getNat (← mkArg y) b
@@ -362,7 +394,7 @@ partial def prependStmt (stx : Stmt) (b : FnBody) : BuilderM FnBody := do
   | `(irStmt|del $x) =>
     return .del (← getVarId x) b
   | `(irStmt|mdata $d) =>
-    return .mdata (← elabMDataVal d) b
+    return .mdata (← mkMData d) b
   | `(irStmt|case $[[$_]]? $_ $[: $_]? of $_*) | `(irStmt|jmp $_ $_*) | `(irStmt|ret $_) | `(irStmt|⊥) =>
     throwWithSyntax stx m!"control statement must be the last statement in a function body"
   | _ => throwIllFormedSyntax stx "IR statement"
@@ -398,7 +430,7 @@ def mkDecl (stx : Lyre.Decl) : BuilderM IR.Decl := do
     let ps ← ps.mapM mkParam
     let (body, bty?) ← mkFnBody stmts
     let some ty ← expectType? did.getId bty? ty?
-      | throw <| .error did s!"cannot infer type for '{did.getId}'"
+      | throwErrorAt did s!"cannot infer type for '{did.getId}'"
     let sorryDep? := sorryDep?.map (·.getId)
     return .fdecl did.getId ps ty body {sorryDep?}
   | `(irDecl|extern $did $ps* : $ty $[:= $entries?*]?) =>
