@@ -222,8 +222,8 @@ def mkExpr (stx : Lyre.Expr) : BuilderM (IR.Expr × Option IRType) := do
   match stx with
   | `(ctor|$i:ctorInfo $ys*) =>
     let (info, args) ← mkCtor i ys
-    let ty := if info.isRef then .object else .uint8
-    return (.ctor info args, some ty)
+    let ty? := if info.isRef then some .object else none
+    return (.ctor info args, ty?)
   | `(irExpr|reset[$n] $x) =>
     return (.reset n.getNat (← getVarId x), some .object)
   | `(irExpr|reuse $x in $i $ys*) =>
@@ -246,8 +246,8 @@ def mkExpr (stx : Lyre.Expr) : BuilderM (IR.Expr × Option IRType) := do
       return (.fap name (← ys.mapM mkArg), some ty)
     else if let some (.ctorInfo {cidx := cidx, ..}) := (← getEnv).find? name then
       let (info, args) ← mkCtorApp name cidx ys
-      let ty := if info.isRef then .object else .uint8
-      return (.ctor info args, some ty)
+      let ty? := if info.isRef then some .object else none
+      return (.ctor info args, ty?)
     else
       throwWithSyntax (ref := c) stx s!"unknown IR constant '{name}'"
   | `(irExpr|pap $c $ys*) =>

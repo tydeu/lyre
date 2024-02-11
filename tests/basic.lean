@@ -27,3 +27,11 @@ ir_impl throwMyError (w : obj) :=
   ret res
 
 #eval throwMyError.toBaseIO
+
+noncomputable opaque getNil (α : Type u) : List α
+
+ir_impl getNil (_ : ◾) :=
+  let l : obj := List.nil
+  ret l
+
+#eval getNil Nat
