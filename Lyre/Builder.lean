@@ -15,6 +15,11 @@ parsed from Lyre's IR Grammar into Lean IR objects.
 
 open Lean IR Elab
 
+register_option Lyre.typeCheck : Bool := {
+  defValue := true
+  descr := "Should Lyre type check generated IR?"
+}
+
 namespace Lyre
 
 abbrev Ty := TSyntax `irType
@@ -271,6 +276,8 @@ def mkExpr (stx : Lyre.Expr) : BuilderM (IR.Expr × Option IRType) := do
 def expectType? (name? : Option Name) (inferred? : Option IRType) (expected? : Option Ty) : BuilderM (Option IRType) := do
   let some ty := expected? | return inferred?
   let ety ← mkType ty
+  unless typeCheck.get (← getOptions) do
+    return some ety
   let some ity := inferred? | return some ety
   unless ity == ety do
     let b := if let some name := name? then m!"'{name}'" else "expression"
@@ -333,6 +340,8 @@ partial def mkAlts (stxs : Array Lyre.Alt) : BuilderM (Array IR.Alt × Option IR
     let (alt, aty?) ← mkAlt stx
     let ty? ← id do
       let some ty := ty? | return aty?
+      unless typeCheck.get (← getOptions) do
+        return some ty
       let some aty := aty? | return ty?
       unless aty == ty do
         throwErrorAt stx m!"type mismatch:{indentD stx}\nhas type '{aty}' but is expected to have type '{ty}'"
@@ -346,7 +355,7 @@ partial def mkControlStmt (stx : Stmt) : BuilderM (FnBody × Option IRType) := d
     let var ← getVar x
     if let some ty := ty? then
       let ety ← mkType ty
-      unless ety == var.ty do
+      unless typeCheck.get (← getOptions) && ety == var.ty do
         throwErrorAt ty m!"type mismatch: '{x.getId}' has type '{var.ty}' but is expected to have type '{ety}'"
     let tid := tid?.map (·.getId) |>.getD .anonymous
     let (alts, ty?) ← mkAlts cs
@@ -357,7 +366,7 @@ partial def mkControlStmt (stx : Stmt) : BuilderM (FnBody × Option IRType) := d
       throwWithSyntax (ref := tk) stx m!"incorrect number of arguments: '{j.getId}' has {jp.params.size} parameter(s), but {ys.size} argument(s) were provided"
     let args ← (jp.params.zip ys).mapM fun (param, argStx) => do
       let (arg, ty) ← mkArgAndType argStx
-      unless ty == param.ty do
+      unless typeCheck.get (← getOptions) && ty == param.ty do
         throwWithSyntax (ref := argStx) stx m!"type mismatch: '{argStx}' has type '{ty}' but is expected to have type '{param.ty}'"
       return arg
     return (.jmp jp.id args, jp.ty?)
