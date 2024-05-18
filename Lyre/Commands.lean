@@ -24,8 +24,8 @@ scoped elab (name := Test.printIr) kw:"#print_ir " id:ident : command => do
 
 /--
 Directly set the Lean IR for a the definition `name`.
-The definition most not already have IR. This can be accomplish, e.g.,
-by marked the definition `noncumptable` when declared.
+The definition most not already have IR. This can be accomplish
+by marking the definition `noncomputable` when declared.
 -/
 def setAdhoc [Monad m] [MonadEnv m] [MonadError m]
   (name : Name) (ps : Array IR.Param) (ty : IRType) (body : FnBody) (info : DeclInfo)
@@ -50,8 +50,8 @@ def setAdhoc [Monad m] [MonadEnv m] [MonadError m]
 
 /--
 Implement a definition directly with raw Lean IR.
-The definition most not already have IR. This can be accomplish, e.g.,
-by marked the definition `noncumptable` when declared.
+The definition most not already have IR. This can be accomplish
+by marking the definition `noncomputable` when declared.
 
 **Example**
 
@@ -66,7 +66,8 @@ ir_impl myAdd (m : @& obj) (n : @& obj) :=
 #eval myAdd 1 2 -- 3
 ```
 -/
-scoped syntax "ir_impl " ident param* (" : " irType)? " := " stmtSeq : command
+scoped syntax (name := irImpl)
+"ir_impl " ident param* (" : " irType)? " := " stmtSeq : command
 
 elab_rules : command | `(ir_impl $id $ps* $[: $ty?]? := $stmts*) => do
   let name ← resolveGlobalConstNoOverloadWithInfo id
