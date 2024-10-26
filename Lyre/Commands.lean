@@ -14,17 +14,19 @@ namespace Lyre
 scoped elab (name := Test.printIr) kw:"#print_ir " id:ident : command => do
   let name ← do
     try
-      resolveGlobalConstNoOverloadWithInfo id
+      liftCoreM <| realizeGlobalConstNoOverloadWithInfo id
     catch _ =>
-      pure <| if rootNamespace.isPrefixOf id.getId
-        then removeRoot id.getId else (← getCurrNamespace) ++ id.getId
+      if rootNamespace.isPrefixOf id.getId then
+        pure <| removeRoot id.getId
+      else
+        pure <| (← getCurrNamespace) ++ id.getId
   let some decl := IR.findEnvDecl (← getEnv) name
     | throwErrorAt id "no IR found for '{name}'"
   logInfoAt kw (IR.declToString decl)
 
 /--
-Directly set the Lean IR for a the definition `name`.
-The definition most not already have IR. This can be accomplish
+Directly set the Lean IR for the definition `name`.
+The definition must not already have IR. This can be accomplish
 by marking the definition `noncomputable` when declared.
 -/
 def setAdhoc [Monad m] [MonadEnv m] [MonadError m]
@@ -70,7 +72,7 @@ scoped syntax (name := irImpl)
 "ir_impl " ident param* (" : " irType)? " := " stmtSeq : command
 
 elab_rules : command | `(ir_impl $id $ps* $[: $ty?]? := $stmts*) => do
-  let name ← resolveGlobalConstNoOverloadWithInfo id
+  let name ← liftCoreM <| realizeGlobalConstNoOverloadWithInfo id
   let (ps, ty, body) ← liftTermElabM <| BuilderM.run do
     let ps ← ps.mapM mkParam
     let (body, bty?) ← mkFnBody stmts

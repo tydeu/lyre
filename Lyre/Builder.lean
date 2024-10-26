@@ -204,7 +204,7 @@ def mkCtor (stx : Lyre.CtorInfo) (argStxs : Array Lyre.Arg) : BuilderM (IR.CtorI
     | throwWithSyntax (ref := ctor) stx s!"ill-formed IR constructor name '{ctor.getId}'"
   let name ← id do
     let some ctorId := ctorId? | return Name.anonymous
-    let name ← resolveGlobalConstNoOverloadWithInfo ctorId
+    let name ← realizeGlobalConstNoOverloadWithInfo ctorId
     let some (.ctorInfo {cidx := ecidx, ..}) := (← getEnv).find? name
       | throwWithSyntax (ref := ctorId) stx m!"'{name}' is not a constructor"
     if cidx != ecidx then
@@ -244,7 +244,7 @@ def mkExpr (stx : Lyre.Expr) : BuilderM (IR.Expr × Option IRType) := do
   | `(irExpr|sproj[$n,$o] $x $[: $ty?]?) =>
     return (.sproj n.getNat o.getNat (← getVarId x), ← ty?.mapM mkType)
   | `(fap|$c:ident $ys*) =>
-    let name ← try resolveGlobalConstNoOverloadWithInfo c catch _ => pure c.getId
+    let name ← try realizeGlobalConstNoOverloadWithInfo c catch _ => pure c.getId
     if let some decl := IR.findEnvDecl (← getEnv) name then
       let ty := match decl with
         | .fdecl (type := ty) .. | .extern (type := ty) .. => ty

@@ -15,6 +15,7 @@ def runLean (file : FilePath) : ScriptM PUnit := do
   if exitCode ≠ 0 then
     IO.Process.exit exitCode.toUInt8
 
+@[test_driver]
 script test do
   runLean <| "tests" / "basic.lean"
   return 0
